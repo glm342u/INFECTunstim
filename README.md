@@ -1,1 +1,1 @@
-Code used for the batch alignment of the INFECT unstimulate dataset. Adapted from cyCombine (Pedersen et al. 2022).
+Code used for the batch alignment of the INFECT unstimulated dataset. Adapted from cyCombine (Pedersen et al. 2022).
