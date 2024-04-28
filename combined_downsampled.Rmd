@@ -1,0 +1,197 @@
+---
+title: "combined_downsampled"
+output: html_document
+date: "2024-01-21"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+setRepositories(ind = c(1:6, 8))
+devtools::install_github("biosurf/cyCombine")
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(version = "3.16")
+
+BiocManager::install("flowCore")
+
+
+```
+
+
+```{r}
+#start here
+library(cyCombine)
+library(tidyverse)
+library(flowCore)
+```
+
+
+```{r}
+data_dir <- "~/Documents/batch_alignment_reunmixed/combined_downsampled"
+
+panel <- read_csv(file.path(data_dir, "panel.csv"))
+metadata <- read_csv(file.path(data_dir, "combined_timepoint_metadata.csv"))
+
+# Extract markers of interest
+markers <- panel %>% 
+  dplyr::filter(Type != "None") %>% 
+  pull(Antigen)
+
+```
+
+```{r}
+######
+
+input_files = list.files(data_dir, pattern = "*.fcs")
+gc()
+fs = read.flowSet(file.path(data_dir, input_files), truncate_max_range = FALSE)
+
+gc()
+uncorrected <- prepare_data(data_dir = data_dir,
+                             markers = markers,
+                             metadata = metadata,
+                             sample_ids = NULL, 
+                             batch_ids = "Batch",
+                             filename_col = "FileName",
+                             condition = "Condition",
+                             down_sample = FALSE,
+                             sample_size = NULL, 
+                             seed = 404,
+                             cofactor = 6000)
+
+gc()
+FileIDs = unique(uncorrected$sample)
+
+
+
+```
+
+```{r}
+# Store result
+gc()
+saveRDS(uncorrected, file = file.path(data_dir, "cycombine_raw_uncorrectedcombined.RDS"))
+gc()
+
+corrected <- uncorrected %>%
+  batch_correct(markers = markers,
+                norm_method = "scale", # "rank" is recommended when combining data with heavy batch effects
+                rlen = 10, # Consider a larger value, if results are not convincing (e.g. 100)
+                covar = "condition")
+
+gc()
+saveRDS(corrected, file = "cycombine_raw_correctedocombined.RDS")
+
+```
+
+```{r}
+#checking for batch effects - inspect data before clustering/analysis
+install.packages('outliers')
+library(outliers)
+detect_batch_effect(corrected,
+                    batch_col = 'batch',
+                    out_dir = paste0(data_dir, '/batch_effect_check14'), 
+                    seed = 434,
+                    name = 'combined_downsampled_outliercheck')
+
+install.packages('ggridges')
+library(ggridges)
+install.packages('uwot')
+library(uwot)
+install.packages('emdist')
+library(emdist)
+install.packages('cowplot')
+library(cowplot)
+library(ggplot2)
+
+# Full analysis - type ?run_analysis to see how you can modify the analysis
+run_analysis(tool = "cycombine", data = "raw", data_dir, uncorrected_extension = '_uncorrected', corrected_extension = "_corrected", markers = markers)
+
+# Otherwise, plots can be made like so: 
+plot_density(uncorrected = uncorrected,
+              corrected = corrected,
+              markers = markers,
+              filename = 'figs/densities_withcovar.png')
+
+
+# PCA plot uncorrected
+pca1 <- uncorrected %>%
+  plot_dimred('uncorrected', type = 'pca')
+  
+# PCA plot corrected
+pca2 <- corrected %>%
+  plot_dimred('corrected', type = 'pca')
+plot_save_two(pca1, pca2, filename = 'figs/pca.png')
+
+# UMAP
+# UMAP plot uncorrected
+set.seed(473)
+sample <- sample(1:nrow(uncorrected), 20000)
+plot1 <- plot_dimred(uncorrected[sample,], type = 'umap', name = 'Uncorrected')
+plot2 <- plot_dimred(corrected[sample,], type = 'umap', name = 'Corrected')
+plot_save_two(plot1, plot2, filename = 'figs/umap.png')
+```
+
+```{r}
+############ cyCombine output to fcs files (from cycombine to diffcyt pipeline from Sam Norton) ###########
+
+colnames(corrected)
+gc()
+# this will be c("CD3","CD4", etc), feel free to generate or write manually
+marker_names = c("id", "CD80", "CD16", "CD25", "CD195", "CD279", "CD206", "CD11b", "CD40", "TCRVa7.2", "CD14", "CD69", "HLADR", "TCRVd2", "CD284", "CD3", "CD282", "CD4", "CD161", "CD86", "CD8", "CD192", "CD56", "CD15", "CD244", "sample", "batch")
+
+param_names = c("id", "BUV395-A", "BUV496-A", "BUV563-A", "BUV615-A", "BUV661-A", "BUV737-A", "BV421-A", "BV480-A", "BV510-A", "BV605-A", "BV650-A", "BV711-A", "BV750-A", "BV786-A", "BB515-A", "FITC-A", "Alexa Fluor 532-A", "PE-A", "PE-Dazzle594-A", "PerCP-A", "PerCP-Cy5.5-A", "APC-A", "Alexa Fluor 647-A", "Alexa Fluor 700-A", "sample", "batch")
+
+# this will be c("[B]530/30-A", etc), feel free to generate or write manually
+colnames(corrected)[which(colnames(corrected) %in% marker_names)] =  param_names
+
+gc()
+# now remove all cyCombine fluff from the output dataframe 
+# This assumes that your files contain the 6 usual scatter params and your corrected dataframe has a column
+# BUT DO NOT REMOVE SAMPLE AS IT IS OUR FILE ID COLUMN
+
+# doing this by col number as something strange going on with the names. Usually bad but as long as you check you're removing the correct columns its fine
+corrected = corrected[,-c(1,2,28,29)]
+colnames(corrected)
+# reverse transformation
+ARCSINH_COFACTOR = 6000 # change to whatever you used in the cyCombine #6000 recommended for spectral flow data
+corrected[,-ncol(corrected)] = sinh(corrected[,-ncol(corrected)])*ARCSINH_COFACTOR
+
+# Put back into original FCS files within the loaded flowset
+corrected = as.matrix(corrected) # has to be a matrix and is currently a data.frame
+# force the values to be numeric (weirdly end up as characters here... not sure why, but this fixes it)
+
+gc()
+
+class(corrected) = "numeric" 
+
+colnames(corrected)
+# find missing, unaltered columns
+# the idea here is that we match the missing unchanged columns from the original fcs files back to the new batch corrected values
+# cell for cell. Given that we are now not downsampling and the orders are aligned this works quite well. 
+# assumes all files are the same so just need to look at the first to get missing column NAMES
+missing_columns = setdiff(colnames(fs[[1]]), colnames(corrected))
+
+colnames(corrected) 
+gc()
+ 
+for (i in 1: length(fs)) {
+   fileID = FileIDs[i] # grab the file ID (file name but without .fcs)
+   # column bind the Time and scatter params from the file specifics exprs from the fs object to the matching sampleID'd rows
+   # of the corrected data to make a complete exprs table
+   corrected_data = cbind(exprs(fs[[i]])[,missing_columns],
+                         corrected[which(corrected[,"sample"] == fileID),which(colnames(corrected) != "sample")])
+  exprs(fs[[i]]) = corrected_data #overwrite the old exprs data with the batch corrected
+ }
+
+write.flowSet(fs, "Batch_Corrected_combined")
+
+gc()
+```
+
+
